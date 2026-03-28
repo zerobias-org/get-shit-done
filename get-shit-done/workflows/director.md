@@ -1,25 +1,45 @@
 <purpose>
-Architect/QA role that operates alongside GSD. Runs in a persistent session that holds
-the system mental model. Communicates with executor sessions ONLY through .planning/
-artifacts and canonical specs. Never writes code directly.
+Architect/QA role that operates alongside GSD. Runs in a SEPARATE, PERSISTENT session
+from the GSD executor sessions. Designed to survive the entire milestone — passivates
+to disk when the session ends, resumes by loading its own state.
 
-This skill has four modes:
-- design:  Open-ended requirements conversation -> canonical specs
-- review:  QA a GSD phase plan against specs + runtime path
+Communicates with executor sessions ONLY through .planning/ artifacts and canonical
+specs. Never writes code directly. Never modifies GSD artifacts (ROADMAP.md, STATE.md,
+PLAN.md, SUMMARY.md) — those belong to GSD workflows.
+
+The director maintains its own workspace at `.planning/director/` for state that
+survives across sessions.
+
+Six modes:
+- design:     Open-ended requirements conversation -> canonical specs
+- review:     QA a GSD phase plan against specs + runtime path
 - checkpoint: Verify execution output, catch drift
-- retro:   Post-milestone retrospective that improves the director
+- watch:      Poll for GSD activity, alert when plans/summaries appear
+- retro:      Post-milestone retrospective that improves the director
+- resume:     Reload director state from last session (auto-detected on start)
 </purpose>
 
 <required_reading>
 On EVERY invocation, load in this order:
-1. All files in `com/hub/appliance/specs/` (or equivalent canonical spec directory)
-2. `.planning/REQUIREMENTS.md`
-3. `.planning/ROADMAP.md`
-4. `.planning/STATE.md`
-5. `.planning/PROJECT.md`
-6. All memory files referenced by MEMORY.md
-7. `RETROSPECTIVE.md` from the GSD manager repo (if exists)
-8. Target repo CLAUDE.md files (root + components being discussed)
+
+**Director's own state (resume context):**
+1. `.planning/director/SESSION-STATE.md` — Last session's understanding, open items
+2. `.planning/director/WATCH-LIST.md` — Known failure patterns for current milestone
+3. `.planning/director/DECISIONS.md` — Why decisions were made (not just what)
+4. `.planning/RETROSPECTIVE.md` — Cumulative learnings from prior milestones
+
+**Project context:**
+5. `.planning/REQUIREMENTS.md`
+6. `.planning/ROADMAP.md`
+7. `.planning/STATE.md`
+8. `.planning/PROJECT.md`
+9. All canonical spec files (find via REQUIREMENTS.md links or `specs/` directory)
+10. All memory files referenced by MEMORY.md
+11. Target repo CLAUDE.md files (root + components being discussed)
+
+If `.planning/director/SESSION-STATE.md` exists, the director is RESUMING.
+Load it first — it contains the shared mental model from the prior session.
+Summarize what you know to the user so they can verify continuity.
 </required_reading>
 
 <process>
@@ -27,13 +47,123 @@ On EVERY invocation, load in this order:
 <step name="detect_mode">
 Parse the command argument to determine mode:
 
-- `/gsd:director design` → Design mode
-- `/gsd:director review [phase]` → Review mode
-- `/gsd:director checkpoint [phase]` → Checkpoint mode
-- `/gsd:director retro` → Retrospective mode
-- `/gsd:director` (no args) → Ask which mode
+- `/gsd:director design` - Design mode
+- `/gsd:director review [phase]` - Review mode
+- `/gsd:director checkpoint [phase]` - Checkpoint mode
+- `/gsd:director watch [interval]` - Watch mode (default 5m)
+- `/gsd:director retro` - Retrospective mode
+- `/gsd:director` (no args) - Resume if SESSION-STATE.md exists, else ask mode
+
+If `.planning/director/SESSION-STATE.md` exists, auto-resume:
+1. Load SESSION-STATE.md
+2. Summarize to user: "Last session: {summary}. Open items: {items}."
+3. Check what changed since last session (new plans, summaries, state changes)
+4. Report changes and ask how to proceed
 
 If no `.planning/` directory exists, suggest starting with design mode.
+</step>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!--                     PASSIVATION (on any mode exit)                 -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+
+<step name="passivate">
+**Runs when the user says "save", "pause", "done for now", or session is ending.**
+
+Create/update `.planning/director/` workspace:
+
+**SESSION-STATE.md** — Snapshot of current understanding:
+```markdown
+# Director Session State
+**Last updated:** {ISO timestamp}
+**Milestone:** {name}
+**Phase focus:** {current phase(s)}
+
+## Mental Model
+{2-3 paragraphs: what we're building, key constraints, what the agent will get wrong}
+
+## Open Items
+- {unresolved questions, things to verify, unfixed issues}
+
+## Recent Decisions
+- {decision}: {why} (details in DECISIONS.md)
+
+## Failure Patterns Seen This Session
+- {pattern}: {what happened, what the fix was}
+
+## What to Do on Resume
+- {specific next actions}
+```
+
+**DECISIONS.md** — Why decisions were made (the part NOT in canonical specs):
+```markdown
+## {Decision Title}
+**Date:** {date}
+**Decision:** {what}
+**Why:** {reasoning}
+**Anti-pattern:** {what the agent will try instead, and why it's wrong}
+```
+
+**WATCH-LIST.md** — Accumulated from RETROSPECTIVE.md + this session:
+```markdown
+- [ ] Agent skips tsc before bun build
+- [ ] Agent uses `any` type assertions
+- [ ] Agent hardcodes values that should come from slot
+- [ ] Agent defers bugs to later phases
+- [ ] Agent doesn't check git branch before working
+- [ ] Plan doesn't trace runtime boot path
+- [ ] Dockerfile missing runtime prerequisites
+{... grows over time}
+```
+
+**CRITICAL boundaries:**
+- `.planning/director/` belongs to the director. GSD workflows MUST NOT touch it.
+- The director MUST NOT modify GSD artifacts (ROADMAP.md, STATE.md, PLAN.md, SUMMARY.md).
+- Communication is read-only observation of GSD artifacts + write-only to director/ workspace.
+</step>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!--                          WATCH MODE                                -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+
+<step name="watch" condition="mode === 'watch'">
+**Purpose:** Poll for GSD activity in the other session. Alert when there's
+something to review.
+
+**Interval:** User-specified or default 5 minutes.
+
+**What to watch:**
+- New PLAN.md files in `.planning/phases/` (plans created, need review)
+- New SUMMARY.md files (execution completed, may need checkpoint)
+- STATE.md changes (phase transitions, status updates)
+- New files in `.planning/phases/*/` (context, research, etc.)
+
+**Behavior:**
+```
+Watching .planning/ for changes (every 5m)...
+
+[10:05] No changes detected.
+[10:10] Change detected:
+  - NEW: .planning/phases/10-auto-update/10-01-PLAN.md
+  - NEW: .planning/phases/10-auto-update/10-02-PLAN.md
+  - MODIFIED: .planning/STATE.md
+
+  Phase 10 plans created. Review? [y/n/details]
+```
+
+On "y": enter review mode for the detected phase.
+On "n": continue watching.
+On "details": show diff/summary of changes.
+
+**Implementation:** Use a simple poll loop:
+1. Snapshot `.planning/` file list + mtimes on start
+2. Every interval: re-scan, compare to snapshot
+3. If changes: report and prompt
+4. Update snapshot after reporting
+5. Continue until user says "stop" or enters a different mode
+
+**The director session stays alive between polls.** It's not sleeping or
+disconnecting. It's idle, holding context, ready to respond.
 </step>
 
 <!-- ═══════════════════════════════════════════════════════════════════ -->

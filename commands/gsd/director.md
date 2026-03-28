@@ -21,7 +21,9 @@ Modes:
 - /gsd:director design     — Open-ended requirements conversation -> canonical specs
 - /gsd:director review     — QA a GSD phase plan against specs + runtime path
 - /gsd:director checkpoint — Verify execution output, catch drift
+- /gsd:director watch      — Poll for GSD activity, alert when plans/summaries appear
 - /gsd:director retro      — Post-milestone retrospective that improves the director
+- /gsd:director            — Auto-resume from last session if state exists
 </objective>
 
 <execution_context>
